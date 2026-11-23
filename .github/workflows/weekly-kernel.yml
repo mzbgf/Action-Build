@@ -184,20 +184,19 @@ jobs:
           cat runs.txt
 
           FAIL=0
+          mkdir -p rel
           while read -r line; do
             b=${line%%=*}; id=${line##*=}
             echo "== 等待 $b ($id)"
             gh run watch "$id" --repo "$REPO" --exit-status --interval 60 || { echo "::error::$b 构建失败"; FAIL=1; }
-            gh run download "$id" --repo "$REPO" -D "artifacts/$b" || true
+            # 用 artifact 的原始 zip：gh run download 会解包，解出来的文件不再是可刷的包
+            gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[]|"\(.id) \(.name)"' > arts.txt || true
+            while read -r aid aname; do
+              out="rel/${b}__${aname}.zip"
+              curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$out" \
+                "https://api.github.com/repos/$REPO/actions/artifacts/$aid/zip" && echo "  取到 $out"
+            done < arts.txt
           done < runs.txt
-          ls -R artifacts || true
-
-          # 两个分支的 ZRAM 包同名，先按分支前缀改名再上传，避免 Release 附件重名冲突
-          mkdir -p rel
-          for f in $(find artifacts -name '*.zip'); do
-            d=$(echo "$f" | sed -E 's#artifacts/([^/]+)/.*#\1#')
-            cp "$f" "rel/${d}__$(basename "$f")"
-          done
           ls -l rel || true
 
           TAG="kernel-$(date -u +%Y%m%d)"
