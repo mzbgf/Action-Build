@@ -170,7 +170,7 @@ jobs:
             if [ "$b" = "BakaSU" ]; then KSU="main/main/Numbersf/"; else KSU="master/master/Numbersf/"; fi
             echo "== 派发 $b"
             gh workflow run "Build All OnePlus Kernels" --repo "$REPO" --ref "$b" \
-              -f FILE=$P_FILE -f SUSFS_CI=$P_SUSFS_CI -f KPM=$P_KPM -f SUSFS_META= \
+              -f FILE=$P_FILE -f SUSFS_CI=$P_SUSFS_CI -f KPM=$P_KPM \
               -f DYNAMIC_REPO=$P_DYNAMIC_REPO -f BUILD_TIME="$BT" -f KSU_META="$KSU" \
               -f LZ4_UPDATE=$P_LZ4_UPDATE -f ZRAM=$P_ZRAM -f SUFFIX="$SUFFIX" -f RESUBLEVEL="$SUB" \
               -f FAST_BUILD=$P_FAST_BUILD -f LSM_BBG=$P_LSM_BBG -f NETFILTER=$P_NETFILTER \
@@ -192,10 +192,18 @@ jobs:
           done < runs.txt
           ls -R artifacts || true
 
+          # 两个分支的 ZRAM 包同名，先按分支前缀改名再上传，避免 Release 附件重名冲突
+          mkdir -p rel
+          for f in $(find artifacts -name '*.zip'); do
+            d=$(echo "$f" | sed -E 's#artifacts/([^/]+)/.*#\1#')
+            cp "$f" "rel/${d}__$(basename "$f")"
+          done
+          ls -l rel || true
+
           TAG="kernel-$(date -u +%Y%m%d)"
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes "自动构建：参数 $SUFFIX / $BT / SUBLEVEL=$SUB；OTA=${NEW_OTA:-未知}" \
-            $(find artifacts -name '*.zip') || echo "::warning::Release 创建失败"
+            --notes "自动构建：SUFFIX=$SUFFIX / BUILD_TIME=$BT / SUBLEVEL=$SUB；OTA=${{ steps.params.outputs.ota_version }}" \
+            rel/*.zip || { echo "::error::Release 创建失败"; FAIL=1; }
           [ "$FAIL" = "0" ] || exit 1
 
       # ---------- 6. 更新状态记录 ----------
