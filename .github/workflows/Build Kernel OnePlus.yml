@@ -761,6 +761,54 @@ jobs:
           grep -nE '^(REPO_OWNER|REPO_NAME|REPO_BRANCH|KSU_VERSION_API|KSU_VERSION_FULL|VERSION_TAG|GIT_BIN|CURL_BIN)' kernel/Kbuild
           echo "::endgroup::"
 
+      # ==== 本 fork 的自有改动（非上游）====
+      # FinaSU 的 Kbuild 对管理器签名是「不传就写死占位符、且校验强制生效」，
+      # 结果管理器会把内核判定为"驱动不可用"。
+      # 设计原则：fail-open —— 这一步无论如何不让构建失败，因为一次构建是资源。
+      #   1) 优先写入第二个槽位（槽 2 + 发布密钥标志），与 FinaSU 官方 build.sh 一致
+      #   2) 槽 2 写不进去就退而改槽 1 的默认值
+      #   3) 两条都不成就只报警，内核照常编出来（只是管理器可能不认）
+      # 数值来源：FinaSU v1.7.0 发布 APK 的签名证书（DER 716 字节）。
+      # ⚠️ 管理器发新版后，这两个值必须重新计算，否则管理器又不认。
+      - name: Patch FinaSU Manager Signature
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          SIG_SIZE="0x02cc"
+          SIG_HASH="2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458"
+          PATCHED="no"
+          cd kernel_workspace/kernel_platform 2>/dev/null || true
+          if [ -d common/drivers ]; then DRV=common/drivers; elif [ -d drivers ]; then DRV=drivers; else DRV=""; fi
+          KSU_DIR=""
+          if [ -n "$DRV" ]; then
+            KSU_DIR=$(dirname "$(realpath "$DRV/kernelsu" 2>/dev/null)" 2>/dev/null) || true
+          fi
+          echo "KSU_DIR=$KSU_DIR"
+          if [ -n "$KSU_DIR" ] && [ -f "$KSU_DIR/kernel/Kbuild" ]; then
+            cd "$KSU_DIR"
+            # 首选：写入槽 2
+            if ! grep -q '^KSU_EXPECTED_SIZE2' kernel/Kbuild; then
+              sed -i "/^KSU_EXPECTED_HASH := /a KSU_EXPECTED_SIZE2 := ${SIG_SIZE}\nKSU_EXPECTED_HASH2 := ${SIG_HASH}\nKSU_SECOND_SIGNATURE_RELEASE := 1" kernel/Kbuild || true
+            fi
+            if grep -q "^KSU_EXPECTED_SIZE2 := ${SIG_SIZE}" kernel/Kbuild; then
+              PATCHED="slot2"
+            else
+              # 退路：直接改槽 1 默认值
+              sed -i -E "s|^KSU_EXPECTED_SIZE := .*|KSU_EXPECTED_SIZE := ${SIG_SIZE}|; s|^KSU_EXPECTED_HASH := .*|KSU_EXPECTED_HASH := ${SIG_HASH}|" kernel/Kbuild || true
+              grep -q "^KSU_EXPECTED_HASH := ${SIG_HASH}" kernel/Kbuild && PATCHED="slot1" || PATCHED="no"
+            fi
+            echo "::group::签名槽位现状"
+            grep -nE 'KSU_EXPECTED|SECOND_SIGNATURE' kernel/Kbuild || true
+            echo "::endgroup::"
+          fi
+          echo "SIGNATURE_PATCH=$PATCHED" >> "$GITHUB_ENV"
+          if [ "$PATCHED" = "no" ]; then
+            echo "::warning::签名槽位没写进去（KSU_DIR=$KSU_DIR）——这版内核仍然可用，但 FinaSU 管理器可能判定驱动不可用"
+          else
+            echo "签名槽位写入成功：$PATCHED"
+          fi
+          exit 0
+
       - name: Apply Patches FinaSU
         env:
           FILE: ${{ github.event.inputs.FILE }}
