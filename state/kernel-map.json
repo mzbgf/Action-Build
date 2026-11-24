@@ -12,10 +12,10 @@
       "sublevel": "197",
       "suffix": "8-o-01214-gbee5b6ef6244",
       "build_time": "Fri Aug 7 06:32:56 UTC 2026",
-      "fetched_at": "2026-11-24T20:50:05Z"
+      "fetched_at": "2026-11-24T20:52:29Z"
     },
     {
-      "version": "PHB110_15.0.0.861(CN01).txt",
+      "version": "PHB110_15.0.0.861(CN01)",
       "key": [
         15,
         0,
@@ -29,7 +29,7 @@
       "fetched_at": "2026-11-24T20:43:37Z"
     },
     {
-      "version": "PHB110_15.0.0.700(CN01).txt",
+      "version": "PHB110_15.0.0.700(CN01)",
       "key": [
         15,
         0,
@@ -43,7 +43,7 @@
       "fetched_at": "2026-11-24T20:43:37Z"
     },
     {
-      "version": "PHB110_14.0.0.401(CN01).txt",
+      "version": "PHB110_14.0.0.401(CN01)",
       "key": [
         14,
         0,
@@ -57,5 +57,5 @@
       "fetched_at": "2026-11-24T20:43:37Z"
     }
   ],
-  "updated_at": "2026-11-24T20:51:00Z"
+  "updated_at": "2026-11-24T20:52:29Z"
 }
