@@ -217,8 +217,15 @@ jobs:
             ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$V")
             URL=$(curl -s --max-time 40 "$OPLUSROM_RAW/$ENC" | head -1)
             case "$URL" in
-              *.zip) ;;
-              *) echo "::warning::$V 的链接不是静态直链（downloadCheck 接口缺参数，取不到），跳过：${URL:0:60}"; FAILED=$((FAILED+1)); continue ;;
+              http*) ;;
+              *) echo "::warning::$V 的 .txt 里没有链接"; FAILED=$((FAILED+1)); continue ;;
+            esac
+            # downloadCheck 是接口跳转：必须带 userid 头取 302 的 Location，那才是带签名的直链
+            case "$URL" in
+              *downloadCheck*)
+                REAL=$(curl -sI --max-time 25 -H "userid: oplus-ota|" "$URL" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2; exit}')
+                if [ -z "$REAL" ]; then echo "::warning::$V 没能解析出 302 目标"; FAILED=$((FAILED+1)); continue; fi
+                URL="$REAL" ;;
             esac
             rm -rf work/boot; mkdir -p work/boot
             if ! work/pd/payload_dumper --user-agent "payload-dumper/0.8.4" -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
