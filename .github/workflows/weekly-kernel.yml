@@ -24,6 +24,8 @@ concurrency:
 env:
   REPO: ${{ github.repository }}
   MAP: state/kernel-map.json
+  OTA_PREFIX: PHB110_11.H
+  REGION: cn
   # 源码 SUBLEVEL 从这里读（一行 curl，不 clone）
   KSRC_MAKEFILE: https://raw.githubusercontent.com/OnePlusOSS/android_kernel_common_oneplus_sm8550/oneplus/sm8550_b_16.0.0_oneplus_11/Makefile
   # oplusrom 的机型目录：版本文件名列表，每个 .txt 里是一条直链
@@ -91,13 +93,79 @@ jobs:
           done
           echo "sync_conflict=$CONFLICT" >> "$GITHUB_OUTPUT"
 
-      # ---------- 2. 刷新映射表（顺带动作，失败不阻断） ----------
+      # ---------- 2. 取当前版本（tracker；oplusrom 里 16.x 的链接是 downloadCheck，缺参数取不到） ----------
+      - name: 取当前版本
+        id: current
+        continue-on-error: true
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p work state
+          python3 -m pip install --quiet requests cryptography || true
+          git clone --depth 1 -q https://github.com/JerryTse-OSS/OPlus-Tracker.git ot 2>/dev/null || true
+          python3 ot/tomboy_pro.py "$OTA_PREFIX" "$REGION" > work/ota.txt 2>&1 || true
+          OV=$(grep -m1 -oP '(?<=• Version: ).*' work/ota.txt | sed 's/[[:space:]]*$//' || true)
+          LINK=$(grep -m1 -oP '(?<=• Link: )\S+' work/ota.txt || true)
+          echo "tracker 版本=${OV:-?} 链接=${LINK:0:70}"
+          if [ -z "$LINK" ]; then echo "::warning::tracker 没给链接，跳过"; exit 0; fi
+          case "$LINK" in
+            *downloadCheck*) FINAL=$(curl -sI -H "userid: oplus-ota|" "$LINK" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2; exit}' || true) ;;
+            *) FINAL="$LINK" ;;
+          esac
+          echo "直链=${FINAL:0:80}"
+          case "$FINAL" in *.zip) ;; *) echo "::warning::没解析出静态直链，跳过"; exit 0 ;; esac
+
+          curl -fsSL -o work/pd.zip "https://github.com/rhythmcache/payload-dumper-rust/releases/download/payload-dumper-rust-v0.8.4/payload_dumper-linux-x86_64.zip" || true
+          unzip -q -o work/pd.zip -d work/pd >/dev/null 2>&1 || true
+          chmod +x work/pd/payload_dumper 2>/dev/null || true
+          gh release download --repo topjohnwu/Magisk -p 'Magisk-*.apk' -D work --clobber >/dev/null 2>&1 || true
+          unzip -q -o work/Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d work/mb >/dev/null 2>&1 || true
+          chmod +x work/mb/lib/x86_64/libmagiskboot.so 2>/dev/null || true
+
+          rm -rf work/cur; mkdir -p work/cur
+          work/pd/payload_dumper --user-agent "payload-dumper/0.8.4" -i boot -o work/cur "$FINAL" > work/pd2.log 2>&1 || true
+          if [ ! -f work/cur/boot.img ]; then echo "::warning::当前版本取 boot 失败：$(tail -1 work/pd2.log | cut -c1-140)"; exit 0; fi
+          ( cd work/cur && ../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb2.log 2>&1 ) || true
+          VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-o-[0-9]+-g[0-9a-f]+' work/cur/kernel 2>/dev/null | head -1 || true)
+          BTN=$(grep -aoE 'SMP PREEMPT [A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9:]{8} UTC [0-9]{4}' work/cur/kernel 2>/dev/null | head -1 | sed 's/^SMP PREEMPT //' || true)
+          if [ -z "$VER" ] || [ -z "$BTN" ]; then echo "::warning::当前版本没解出内核串"; exit 0; fi
+          echo "当前版本内核串：$VER | $BTN"
+          printf '%s\t%s\t%s\n' "${OV:-unknown}" "$VER" "$BTN" > work/new2.tsv
+          python3 - <<'PY' || { echo "::error::写表失败"; exit 1; }
+          import json, os, re, datetime
+          def key(v):
+              m = re.search(r'_(\d+)\.(\d+)\.(\d+)\.(\d+)', v)
+              return [int(x) for x in m.groups()] if m else [0,0,0,0]
+          p = os.environ['MAP']
+          d = json.load(open(p)) if os.path.exists(p) else {'entries': []}
+          E = {e['version']: e for e in d.get('entries', [])}
+          for line in open('work/new2.tsv'):
+              parts = line.rstrip('\n').split('\t')
+              if len(parts) != 3: continue
+              ver, uts, bt = parts
+              sub = re.search(r'^5\.15\.(\d+)', uts)
+              E[ver] = {'version': ver, 'key': key(ver), 'uts': uts,
+                        'sublevel': sub.group(1) if sub else '',
+                        'suffix': re.sub(r'^[0-9.]+-android[0-9]+-', '', uts), 'build_time': bt,
+                        'fetched_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
+          d['entries'] = sorted(E.values(), key=lambda e: e['key'], reverse=True)
+          d['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+          json.dump(d, open(p,'w'), ensure_ascii=False, indent=2)
+          print(f'表里现有 {len(d["entries"])} 版')
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$MAP"
+          git diff --cached --quiet || { git commit -q -m "chore(map): 当前版本 $OV $(date -u +%F)"; git push -q; }
+
+      # ---------- 3. 刷新映射表（顺带动作，失败不阻断） ----------
       # 抓 oplusrom 目录 → 数值排序 → 与表比对差集 → 逐版取直链、取 boot、解内核串 → 补行
       # 第一次跑差集等于全部，会下载十几个版本，之后差集通常为空
       - name: 刷新映射表
         id: refresh
         continue-on-error: true
         run: |
+          set +e
           set -uo pipefail
           mkdir -p work state
 
@@ -164,7 +232,7 @@ jobs:
           done < work/todo.txt
 
           # 2e. 合并进表（按数值降序），有变化就提交
-          python3 - <<'PY'
+          python3 - <<'PY' || { echo "::error::写表失败"; exit 1; }
           import json, os, re, datetime
           def key(v):
               m = re.search(r'_(\d+)\.(\d+)\.(\d+)\.(\d+)', v)
@@ -182,10 +250,10 @@ jobs:
                   'version': ver, 'key': key(ver), 'uts': uts,
                   'sublevel': sub.group(1) if sub else '',
                   'suffix': suff, 'build_time': bt,
-                  'fetched_at': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                  'fetched_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
               }
           d['entries'] = sorted(E.values(), key=lambda e: e['key'], reverse=True)
-          d['updated_at'] = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+          d['updated_at'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
           json.dump(d, open(p,'w'), ensure_ascii=False, indent=2)
           print(f'表里现有 {len(d["entries"])} 版')
           PY
