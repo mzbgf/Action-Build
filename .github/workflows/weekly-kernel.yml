@@ -127,7 +127,7 @@ jobs:
           work/pd/payload_dumper --user-agent "payload-dumper/0.8.4" -i boot -o work/cur "$FINAL" > work/pd2.log 2>&1 || true
           if [ ! -f work/cur/boot.img ]; then echo "::warning::当前版本取 boot 失败：$(tail -1 work/pd2.log | cut -c1-140)"; exit 0; fi
           ( cd work/cur && ../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb2.log 2>&1 ) || true
-          VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-(o-)?[0-9]+-g[0-9a-f]+' work/cur/kernel 2>/dev/null | head -1 || true)
+          VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-(o-)?([0-9]+-)?g[0-9a-f]+' work/cur/kernel 2>/dev/null | head -1 || true)
           BTN=$(grep -aoE 'SMP PREEMPT [A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9:]{8} UTC [0-9]{4}' work/cur/kernel 2>/dev/null | head -1 | sed 's/^SMP PREEMPT //' || true)
           if [ -z "$VER" ] || [ -z "$BTN" ]; then echo "::warning::当前版本没解出内核串"; exit 0; fi
           echo "当前版本内核串：$VER | $BTN"
@@ -238,7 +238,7 @@ jobs:
             if ! ( cd work/boot && ../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb.log 2>&1 ) || [ ! -f work/boot/kernel ]; then
               echo "::warning::$V 解 boot 失败"; FAILED=$((FAILED+1)); continue
             fi
-            VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-(o-)?[0-9]+-g[0-9a-f]+' work/boot/kernel 2>/dev/null | head -1)
+            VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-(o-)?([0-9]+-)?g[0-9a-f]+' work/boot/kernel 2>/dev/null | head -1)
             BTN=$(grep -aoE 'SMP PREEMPT [A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9:]{8} UTC [0-9]{4}' work/boot/kernel 2>/dev/null | head -1 | sed 's/^SMP PREEMPT //')
             if [ -z "$VER" ] || [ -z "$BTN" ]; then
               echo "::warning::$V 没解出内核串"; FAILED=$((FAILED+1)); continue
