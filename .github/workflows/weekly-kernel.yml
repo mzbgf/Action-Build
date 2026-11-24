@@ -226,6 +226,11 @@ jobs:
                 if [ -z "$REAL" ]; then echo "::warning::$V 没能解析出 302 目标"; FAILED=$((FAILED+1)); continue; fi
                 URL="$REAL" ;;
             esac
+            # 照 oplus-ota.sh 的做法：先带 Range 头 HEAD 一次，确认回 206（支持按需提取）
+            R206=$(curl -sI --max-time 15 -H "Range: bytes=0-1048575" "$URL" 2>/dev/null | grep -c '206' || true)
+            if [ "${R206:-0}" -lt 1 ]; then
+              echo "::warning::$V 直链不支持 range（没有 206）"; FAILED=$((FAILED+1)); continue
+            fi
             rm -rf work/boot; mkdir -p work/boot
             if ! work/pd/payload_dumper --user-agent "payload-dumper/0.8.4" -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
               echo "::warning::$V 取 boot 失败：$(tail -1 work/pd.log | cut -c1-160)"; FAILED=$((FAILED+1)); continue
