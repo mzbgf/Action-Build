@@ -15,6 +15,76 @@
       "fetched_at": "2026-11-24T21:35:40Z"
     },
     {
+      "version": "PHB110_16.0.5.1002(CN01)",
+      "key": [
+        16,
+        0,
+        5,
+        1002
+      ],
+      "uts": "5.15.180-android13-8-o-01179-g2b658b8c77d0",
+      "sublevel": "180",
+      "suffix": "8-o-01179-g2b658b8c77d0",
+      "build_time": "Tue Jul 7 06:58:32 UTC 2026",
+      "fetched_at": "2026-11-24T21:38:51Z"
+    },
+    {
+      "version": "PHB110_16.0.5.701(CN01)",
+      "key": [
+        16,
+        0,
+        5,
+        701
+      ],
+      "uts": "5.15.180-android13-8-o-01178-gfc2079499f31",
+      "sublevel": "180",
+      "suffix": "8-o-01178-gfc2079499f31",
+      "build_time": "Thu Apr 2 08:08:53 UTC 2026",
+      "fetched_at": "2026-11-24T21:38:51Z"
+    },
+    {
+      "version": "PHB110_16.0.3.500(CN01)",
+      "key": [
+        16,
+        0,
+        3,
+        500
+      ],
+      "uts": "5.15.180-android13-8-o-01176-g6333b0dbc8ed",
+      "sublevel": "180",
+      "suffix": "8-o-01176-g6333b0dbc8ed",
+      "build_time": "Fri Dec 12 11:37:03 UTC 2025",
+      "fetched_at": "2026-11-24T21:38:51Z"
+    },
+    {
+      "version": "PHB110_16.0.2.400(CN01)",
+      "key": [
+        16,
+        0,
+        2,
+        400
+      ],
+      "uts": "5.15.180-android13-8-o-01174-g112670b1e39a",
+      "sublevel": "180",
+      "suffix": "8-o-01174-g112670b1e39a",
+      "build_time": "Wed Dec 17 06:52:40 UTC 2025",
+      "fetched_at": "2026-11-24T21:38:51Z"
+    },
+    {
+      "version": "PHB110_16.0.1.300(CN01)",
+      "key": [
+        16,
+        0,
+        1,
+        300
+      ],
+      "uts": "5.15.167-android13-8-o-01155-ga71f0d7db4db",
+      "sublevel": "167",
+      "suffix": "8-o-01155-ga71f0d7db4db",
+      "build_time": "Fri Sep 19 12:00:24 UTC 2025",
+      "fetched_at": "2026-11-24T21:38:51Z"
+    },
+    {
       "version": "PHB110_15.0.0.861(CN01)",
       "key": [
         15,
@@ -57,5 +127,5 @@
       "fetched_at": "2026-11-24T20:43:37Z"
     }
   ],
-  "updated_at": "2026-11-24T21:35:40Z"
+  "updated_at": "2026-11-24T21:38:51Z"
 }
