@@ -1,6 +1,20 @@
 {
   "entries": [
     {
+      "version": "PHB110_16.0.5.1301(CN01)",
+      "key": [
+        16,
+        0,
+        5,
+        1301
+      ],
+      "uts": "5.15.197-android13-8-o-01214-gbee5b6ef6244",
+      "sublevel": "197",
+      "suffix": "8-o-01214-gbee5b6ef6244",
+      "build_time": "Fri Aug 7 06:32:56 UTC 2026",
+      "fetched_at": "2026-11-24T20:45:04Z"
+    },
+    {
       "version": "PHB110_15.0.0.861(CN01).txt",
       "key": [
         15,
@@ -43,5 +57,5 @@
       "fetched_at": "2026-11-24T20:43:37Z"
     }
   ],
-  "updated_at": "2026-11-24T20:43:37Z"
+  "updated_at": "2026-11-24T20:45:04Z"
 }
