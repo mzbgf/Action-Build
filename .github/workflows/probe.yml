@@ -1,0 +1,130 @@
+name: probe
+
+# 低成本真实测试：只用 Actions 环境，不编译内核。
+# 所有环节一次跑完，每步 fail-open（失败只记录，不中断），最后汇总成一张表。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: 全部探测
+        run: |
+          set -uo pipefail
+          R=results.tsv
+          : > "$R"
+          rec(){ printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$R"; echo "[$2] $1 :: $3"; }
+
+          python3 -m pip install --quiet requests cryptography >/dev/null 2>&1 || true
+          git clone --depth 1 -q https://github.com/JerryTse-OSS/OPlus-Tracker.git ot 2>/dev/null || true
+          mkdir -p out tools ota
+
+          # ---------- S1 查 OTA ----------
+          T0=$(date +%s)
+          if python3 ot/tomboy_pro.py PHB110_11.H cn > out/ota.txt 2>&1 && grep -q '• Version:' out/ota.txt; then
+            VER=$(grep -m1 -oP '(?<=• Version: ).*' out/ota.txt | sed 's/[[:space:]]*$//')
+            rec "S1 查 OTA（Actions 网络能否访问 OPPO 接口）" ok "$(( $(date +%s)-T0 ))s / $VER"
+          else
+            rec "S1 查 OTA" fail "见日志；首行：$(head -1 out/ota.txt 2>/dev/null | cut -c1-80)"
+          fi
+
+          # ---------- S2 解析链接（downloadCheck → 302） ----------
+          LINK=$(grep -m1 -oP '(?<=• Link: )\S+' out/ota.txt 2>/dev/null || true)
+          FINAL=""
+          if [ -n "$LINK" ]; then
+            case "$LINK" in
+              *downloadCheck*)
+                LOC=$(curl -sI -H "userid: oplus-ota|" "$LINK" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="location:"{print $2; exit}')
+                if [ -n "$LOC" ]; then FINAL="$LOC"; rec "S2 downloadCheck 解析动态链接" ok "拿到 302 目标"; else rec "S2 downloadCheck 解析" fail "没有 Location 头"; fi ;;
+              *) FINAL="$LINK"; rec "S2 链接形态" ok "直链，无需解析" ;;
+            esac
+          else
+            rec "S2 链接可用性" fail "S1 没取到链接"
+          fi
+
+          # ---------- S3 payload-dumper（x86_64）取 boot ----------
+          if [ -n "${FINAL:-}" ]; then
+            T0=$(date +%s)
+            gh release download payload-dumper-rust-v0.8.4 --repo rhythmcache/payload-dumper-rust \
+              -p 'payload_dumper-linux-x86_64.zip' -D tools --clobber >/dev/null 2>&1 || true
+            unzip -q -o tools/payload_dumper-linux-x86_64.zip -d tools/pd >/dev/null 2>&1 || true
+            chmod +x tools/pd/payload_dumper 2>/dev/null || true
+            if tools/pd/payload_dumper -i boot -o ota "$FINAL" > out/pd.log 2>&1 && [ -f ota/boot.img ]; then
+              rec "S3 payload-dumper(x86_64) 取 boot" ok "$(( $(date +%s)-T0 ))s / $(du -h ota/boot.img | cut -f1)"
+            else
+              rec "S3 payload-dumper(x86_64) 取 boot" fail "$(tail -2 out/pd.log | tr '\n' ' ' | cut -c1-120)"
+            fi
+          else
+            rec "S3 payload-dumper" fail "上游没给出可用链接"
+          fi
+
+          # ---------- S4 magiskboot（x86_64）读版本串 ----------
+          if [ -f ota/boot.img ]; then
+            gh release download --repo topjohnwu/Magisk -p 'Magisk-*.apk' -D tools --clobber >/dev/null 2>&1 || true
+            unzip -q -o tools/Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d tools/mb >/dev/null 2>&1 || true
+            chmod +x tools/mb/lib/x86_64/libmagiskboot.so 2>/dev/null || true
+            ( cd ota && ../tools/mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../out/mb.log 2>&1 ) || true
+            V=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-o-[0-9]+-g[0-9a-f]+' ota/kernel 2>/dev/null | head -1)
+            if [ -n "${V:-}" ]; then rec "S4 magiskboot(x86_64) 读版本串" ok "$V"; else rec "S4 magiskboot 读版本串" fail "见 out/mb.log"; fi
+          else
+            rec "S4 magiskboot" fail "没有 boot.img"
+          fi
+
+          # ---------- S5 源码 SUBLEVEL ----------
+          SRC=$(curl -s "https://raw.githubusercontent.com/OnePlusOSS/android_kernel_common_oneplus_sm8550/oneplus/sm8550_b_16.0.0_oneplus_11/Makefile" | awk '/^SUBLEVEL/{print $3}')
+          if [ -n "${SRC:-}" ]; then rec "S5 读源码 SUBLEVEL" ok "$SRC"; else rec "S5 读源码 SUBLEVEL" fail "取不到 Makefile"; fi
+
+          # ---------- S6 历史 OTA 直链是否还活着 ----------
+          OLDURL=$(curl -s "https://raw.githubusercontent.com/chlink2025/oplusrom/main/links/%E4%B8%80%E5%8A%A011/PHB110_15.0.0.861(CN01).txt" | head -1)
+          if [ -n "${OLDURL:-}" ]; then
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' -I --max-time 20 "$OLDURL" 2>/dev/null || echo ERR)
+            rec "S6 历史 OTA 直链可达性（15.0.0.861）" ok "HTTP $CODE"
+          else
+            rec "S6 历史 OTA 链接文件" fail "取不到内容"
+          fi
+
+          # ---------- S7 管理器 APK 证书 → size/hash（验证算法可复现） ----------
+          curl -sL -o tools/fina.apk "https://github.com/LyraVoid/FinaSU/releases/download/v1.7.0/FinaSU_v1.7.0_33224-release.apk" || true
+          if [ -s tools/fina.apk ]; then
+            RES=$(python3 - tools/fina.apk <<'PY'
+          import sys, hashlib
+          d = open(sys.argv[1], 'rb').read()
+          i = d.rfind(b'APK Sig Block 42'); start = max(0, i-8192); p = start
+          while True:
+              j = d.find(b'\x30\x82', p)
+              if j < 0 or j > i: print("NO-CERT"); break
+              ln = int.from_bytes(d[j+2:j+4], 'big') + 4
+              if 500 < ln < 2000:
+                  c = d[j:j+ln]
+                  print("0x%04x %s" % (len(c), hashlib.sha256(c).hexdigest())); break
+              p = j + 2
+          PY
+          )
+            case "$RES" in
+              "0x02cc 2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458") rec "S7 重算管理器证书 size/hash" ok "与预期一致" ;;
+              NO-CERT) rec "S7 重算管理器证书" fail "没找到证书" ;;
+              *) rec "S7 重算管理器证书" fail "结果不同：$RES" ;;
+            esac
+          else
+            rec "S7 管理器 APK" fail "下载失败"
+          fi
+
+          echo "---- 汇总 ----"
+          cat "$R"
+
+      - name: 写汇总
+        if: always()
+        run: |
+          {
+            echo "## probe 结果"
+            echo
+            echo "| 环节 | 结果 | 说明 |"
+            echo "|---|---|---|"
+            awk -F'\t' '{print "| " $1 " | " $2 " | " $3 " |"}' results.tsv 2>/dev/null || echo "| - | - | 无结果文件 |"
+          } >> "$GITHUB_STEP_SUMMARY"
