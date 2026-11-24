@@ -13,6 +13,8 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: 全部探测
         run: |
@@ -51,9 +53,9 @@ jobs:
           # ---------- S3 payload-dumper（x86_64）取 boot ----------
           if [ -n "${FINAL:-}" ]; then
             T0=$(date +%s)
-            gh release download payload-dumper-rust-v0.8.4 --repo rhythmcache/payload-dumper-rust \
-              -p 'payload_dumper-linux-x86_64.zip' -D tools --clobber >/dev/null 2>&1 || true
-            unzip -q -o tools/payload_dumper-linux-x86_64.zip -d tools/pd >/dev/null 2>&1 || true
+            # 直接用 release 资产的直链，避免依赖 gh 认证
+            curl -fsSL -o tools/pd.zip "https://github.com/rhythmcache/payload-dumper-rust/releases/download/payload-dumper-rust-v0.8.4/payload_dumper-linux-x86_64.zip" || true
+            unzip -q -o tools/pd.zip -d tools/pd >/dev/null 2>&1 || true
             chmod +x tools/pd/payload_dumper 2>/dev/null || true
             if tools/pd/payload_dumper -i boot -o ota "$FINAL" > out/pd.log 2>&1 && [ -f ota/boot.img ]; then
               rec "S3 payload-dumper(x86_64) 取 boot" ok "$(( $(date +%s)-T0 ))s / $(du -h ota/boot.img | cut -f1)"
