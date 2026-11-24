@@ -144,14 +144,14 @@ jobs:
             ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$V")
             URL=$(curl -s --max-time 40 "$OPLUSROM_RAW/$ENC" | head -1)
             case "$URL" in
-              http*) ;;
-              *) echo "::warning::$V 没有直链"; FAILED=$((FAILED+1)); continue ;;
+              *.zip) ;;
+              *) echo "::warning::$V 的链接不是静态直链（downloadCheck 接口缺参数，取不到），跳过：${URL:0:60}"; FAILED=$((FAILED+1)); continue ;;
             esac
             rm -rf work/boot; mkdir -p work/boot
             if ! work/pd/payload_dumper --user-agent "payload-dumper/0.8.4" -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
               echo "::warning::$V 取 boot 失败：$(tail -1 work/pd.log | cut -c1-160)"; FAILED=$((FAILED+1)); continue
             fi
-            if ! ( cd work/boot && ../../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb.log 2>&1 ) || [ ! -f work/boot/kernel ]; then
+            if ! ( cd work/boot && ../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb.log 2>&1 ) || [ ! -f work/boot/kernel ]; then
               echo "::warning::$V 解 boot 失败"; FAILED=$((FAILED+1)); continue
             fi
             VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-o-[0-9]+-g[0-9a-f]+' work/boot/kernel 2>/dev/null | head -1)
