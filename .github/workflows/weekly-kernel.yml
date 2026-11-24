@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: '演练模式：只派发 ping 验证链路，不触发真实编译'
+        description: '演练：只追平上游+读取参数，不派发编译（默认关闭＝真编译）'
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: write
@@ -151,16 +151,14 @@ jobs:
             echo "changed=$CHANGED"
           } >> "$GITHUB_OUTPUT"
 
-      # ---------- 4. 演练 ----------
-      - name: 演练（派发 ping）
+      # ---------- 4. 演练（只跑前半段，不派发） ----------
+      - name: 演练（不派发编译）
         if: env.DRY_RUN == 'true'
         run: |
-          set -uo pipefail
-          gh workflow run ping.yml --repo "$REPO" --ref "${GITHUB_REF_NAME}"
-          sleep 15
-          ID=$(gh run list --repo "$REPO" --workflow ping.yml --limit 1 --json databaseId --jq '.[0].databaseId')
-          gh run watch "$ID" --repo "$REPO" --exit-status --interval 10
-          echo "派发链路可用"
+          echo "演练模式：追平与取参数已完成，本轮不派发编译。"
+          echo "- SUFFIX=\`${{ steps.params.outputs.suffix }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- BUILD_TIME=\`${{ steps.params.outputs.build_time }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- OTA=\`${{ steps.params.outputs.ota_version }}\`" >> "$GITHUB_STEP_SUMMARY"
 
       # ---------- 5. 两版并行：派发 → 轮询 → 取产物 ----------
       - name: 触发两版编译（并行）
@@ -189,6 +187,7 @@ jobs:
           cat runs.txt
 
           # 轮询两边状态，任意一边完成不提前退出
+          PENDING=99
           for i in $(seq 1 100); do
             PENDING=0
             while read -r line; do
@@ -200,17 +199,34 @@ jobs:
             [ "$PENDING" -eq 0 ] && break
             sleep 45
           done
+          if [ "$PENDING" -ne 0 ]; then
+            echo "::error::等待超时，仍有构建未完成；不取产物、不发 Release"
+            while read -r line; do echo "- ${line%%=*} → https://github.com/$REPO/actions/runs/${line##*=}"; done < runs.txt
+            exit 1
+          fi
 
           FAIL=0
-          mkdir -p rel
           while read -r line; do
             b=${line%%=*}; id=${line##*=}
             CONC=$(gh run view "$id" --repo "$REPO" --json conclusion --jq '.conclusion')
             echo "== $b ($id) => $CONC"
             [ "$CONC" = "success" ] || { echo "::error::$b 构建失败"; FAIL=1; }
+          done < runs.txt
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::有分支构建失败，本轮不发 Release"
+            while read -r line; do echo "- ${line%%=*} → https://github.com/$REPO/actions/runs/${line##*=}"; done < runs.txt
+            exit 1
+          fi
+
+          # 全部成功才取产物
+          mkdir -p rel
+          while read -r line; do
+            b=${line%%=*}; id=${line##*=}
             gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[]|"\(.id) \(.name)"' > arts.txt || true
             while read -r aid aname; do
               out="rel/${b}__${aname}.zip"
+              # 官方 artifact 下载端点（返回原始 zip，未解包）
+              # 备选：gh run download 会解包，需要再自行打包；暂不采用
               curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$out" \
                 "https://api.github.com/repos/$REPO/actions/artifacts/$aid/zip" && echo "  取到 $out"
             done < arts.txt
@@ -218,10 +234,10 @@ jobs:
           ls -l rel || true
 
           TAG="kernel-$(date -u +%Y%m%d)"
+          OTA_VER="${{ steps.params.outputs.ota_version }}"
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes "SUFFIX=$SUFFIX | BUILD_TIME=$BT | SUBLEVEL=$SUB | OTA=${{ steps.params.outputs.ota_version }}" \
-            rel/*.zip || { echo "::error::Release 创建失败"; FAIL=1; }
-          [ "$FAIL" = "0" ] || exit 1
+            --notes "对应官方版本 ${OTA_VER}；内核伪装 SUFFIX=$SUFFIX / BUILD_TIME=$BT / SUBLEVEL=$SUB；下载前请核对你手机的版本号是否一致。" \
+            rel/*.zip || { echo "::error::Release 创建失败"; exit 1; }
 
       # ---------- 6. 状态 + 报告 ----------
       - name: 更新状态记录
@@ -285,19 +301,3 @@ jobs:
             echo "产物："
             ls -1 rel 2>/dev/null | sed 's/^/- /' || echo "- （无）"
           } >> "$GITHUB_STEP_SUMMARY"
-
-  notify:
-    name: 失败时开 issue
-    needs: update
-    if: failure()
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - name: 开 issue
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh issue create --repo "${{ github.repository }}" \
-            --title "每周内核任务失败 $(date -u +%F)" \
-            --body "运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
