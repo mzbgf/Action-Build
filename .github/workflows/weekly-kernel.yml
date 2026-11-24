@@ -139,7 +139,10 @@ jobs:
               return [int(x) for x in m.groups()] if m else [0,0,0,0]
           p = os.environ['MAP']
           d = json.load(open(p)) if os.path.exists(p) else {'entries': []}
-          E = {e['version']: e for e in d.get('entries', [])}
+          E = {}
+          for e in d.get('entries', []):
+              e['version'] = re.sub(r'\.txt$', '', e['version'])
+              E[e['version']] = e
           for line in open('work/new2.tsv'):
               parts = line.rstrip('\n').split('\t')
               if len(parts) != 3: continue
@@ -209,6 +212,7 @@ jobs:
           FAILED=0
           while read -r V; do
             [ -n "$V" ] || continue
+            V="${V%.txt}"
             echo "===== $V"
             ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$V")
             URL=$(curl -s --max-time 40 "$OPLUSROM_RAW/$ENC" | head -1)
@@ -240,7 +244,10 @@ jobs:
               return [int(x) for x in m.groups()] if m else [0,0,0,0]
           p = os.environ['MAP']
           d = json.load(open(p)) if os.path.exists(p) else {'entries': []}
-          E = {e['version']: e for e in d.get('entries', [])}
+          E = {}
+          for e in d.get('entries', []):
+              e['version'] = re.sub(r'\.txt$', '', e['version'])
+              E[e['version']] = e
           for line in open('work/new.tsv'):
               parts = line.rstrip('\n').split('\t')
               if len(parts) != 3: continue
