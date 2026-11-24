@@ -1,4 +1,47 @@
 {
-  "entries": [],
-  "updated_at": "2026-11-24T20:36:09Z"
+  "entries": [
+    {
+      "version": "PHB110_15.0.0.861(CN01).txt",
+      "key": [
+        15,
+        0,
+        0,
+        861
+      ],
+      "uts": "5.15.167-android13-8-o-01144-gb3f32e037fab",
+      "sublevel": "167",
+      "suffix": "8-o-01144-gb3f32e037fab",
+      "build_time": "Fri Sep 5 06:37:22 UTC 2025",
+      "fetched_at": "2026-11-24T20:43:37Z"
+    },
+    {
+      "version": "PHB110_15.0.0.700(CN01).txt",
+      "key": [
+        15,
+        0,
+        0,
+        700
+      ],
+      "uts": "5.15.149-android13-8-o-01127-ga2c6d94475ba",
+      "sublevel": "149",
+      "suffix": "8-o-01127-ga2c6d94475ba",
+      "build_time": "Thu Mar 20 12:09:30 UTC 2025",
+      "fetched_at": "2026-11-24T20:43:37Z"
+    },
+    {
+      "version": "PHB110_14.0.0.401(CN01).txt",
+      "key": [
+        14,
+        0,
+        0,
+        401
+      ],
+      "uts": "5.15.94-android13-8-o-00718-gdd3c2549102f",
+      "sublevel": "94",
+      "suffix": "8-o-00718-gdd3c2549102f",
+      "build_time": "Thu Jan 4 05:01:04 UTC 2024",
+      "fetched_at": "2026-11-24T20:43:37Z"
+    }
+  ],
+  "updated_at": "2026-11-24T20:43:37Z"
 }
