@@ -184,7 +184,6 @@ jobs:
           python3 - <<'PY'
           import json, os, re
           vs = [l.strip() for l in open('work/versions.txt') if l.strip()]
-          vs = [v[:-4] if v.endswith('.txt') else v for v in vs]
           def key(v):
               m = re.search(r'_(\d+)\.(\d+)\.(\d+)\.(\d+)', v)
               return [int(x) for x in m.groups()] if m else [0,0,0,0]
@@ -192,7 +191,7 @@ jobs:
           known = set()
           if os.path.exists(os.environ['MAP']):
               known = {e['version'] for e in json.load(open(os.environ['MAP'])).get('entries', [])}
-          todo = [v for v in vs if v not in known]
+          todo = [v for v in vs if (v[:-4] if v.endswith('.txt') else v) not in known]
           open('work/todo.txt','w').write('\n'.join(todo) + ('\n' if todo else ''))
           print(f'表里已有 {len(known)} 版，本轮待补 {len(todo)} 版')
           PY
