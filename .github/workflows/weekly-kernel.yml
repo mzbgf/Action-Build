@@ -1,14 +1,9 @@
 name: Weekly Kernel Update
 
-# 每周一次：追平上游 → 读官方内核版本串 → 触发两版编译 → 发 Release
-# 设计约定：
-#   1. 官方内核版本串变了才改伪装参数（SUFFIX / BUILD_TIME / RESUBLEVEL），其余 18 项固定
-#   2. 读不到官方内核串时沿用上次参数，不中断
-#   3. 失败不发邮件轰炸，只在失败时开一个 issue
-
+# 每周一次：追平上游 → 读官方内核版本串 → 触发两版编译 → 发 Release → 写状态
+# 职责边界：只负责「追平 / 取参数 / 派发 / 收产物 / 报告」，不判断产物合不合格。
 on:
   schedule:
-    # 每周日 18:00 UTC = 每周一 02:00 北京时间
     - cron: '0 18 * * 0'
   workflow_dispatch:
     inputs:
@@ -33,7 +28,7 @@ env:
   STATE: state/kernel-state.json
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # ---- 18 项固定参数（与手工填的那套一致）----
+  # ---- 18 项固定参数 ----
   P_FILE: oneplus_11_b
   P_SUSFS_CI: CI
   P_KPM: N/A
@@ -54,7 +49,7 @@ env:
 
 jobs:
   update:
-    name: 追平上游 + 读内核串 + 触发编译
+    name: 追平 + 取参数 + 派发 + 归档
     runs-on: ubuntu-latest
     timeout-minutes: 180
     outputs:
@@ -62,25 +57,36 @@ jobs:
       build_time: ${{ steps.params.outputs.build_time }}
       sublevel: ${{ steps.params.outputs.sublevel }}
       ota_version: ${{ steps.params.outputs.ota_version }}
-      params_changed: ${{ steps.params.outputs.changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- 1. 追平上游（纯快进，失败不中断） ----------
-      - name: 追平上游 BakaSU / FinaSU
+      # ---------- 1. 追平上游（区分「已最新」和「真失败」） ----------
+      - name: 追平上游
+        id: sync
         run: |
           set -uo pipefail
+          CONFLICT=0
           for b in BakaSU FinaSU; do
             echo "== 追平 $b"
             out=$(gh api -X POST "repos/$REPO/merge-upstream" -f branch="$b" 2>&1) && {
-              echo "  $out"
+              echo "  成功: $out"
             } || {
-              echo "  未追平（继续）: $out"
+              case "$out" in
+                *"not behind"*|*"already up to date"*|*"up to date"*)
+                  echo "  已是最新" ;;
+                *conflict*|*Conflict*)
+                  echo "::warning::$b 追平遇到冲突，本次沿用旧脚本构建"
+                  CONFLICT=1 ;;
+                *)
+                  echo "::warning::$b 追平失败（非冲突）：$out"
+                  CONFLICT=1 ;;
+              esac
             }
           done
+          echo "sync_conflict=$CONFLICT" >> "$GITHUB_OUTPUT"
 
-      # ---------- 2. 查官方 OTA 版本 ----------
+      # ---------- 2. 查官方 OTA ----------
       - name: 查官方 OTA 版本
         run: |
           set -uo pipefail
@@ -88,22 +94,19 @@ jobs:
           git clone --depth 1 -q https://github.com/JerryTse-OSS/OPlus-Tracker.git ot
           python3 ot/tomboy_pro.py "$OTA_PREFIX" "$REGION" > ota.txt 2>&1 || true
           sed -n '1,30p' ota.txt
-          if ! grep -q '• Link:' ota.txt; then
-            echo "::warning::没查到 OTA 链接，本轮沿用上次参数"
-          fi
+          grep -q '• Link:' ota.txt || echo "::warning::没查到 OTA 链接，本轮沿用上次参数"
 
-      # ---------- 3. 决定伪装参数 ----------
+      # ---------- 3. 决定参数（含空值守卫） ----------
       - name: 决定伪装参数
         id: params
         run: |
           set -uo pipefail
           NEW_OTA=$(grep -m1 -oP '(?<=• Version: ).*' ota.txt | sed 's/[[:space:]]*$//' || true)
           OLD_OTA=$(python3 -c "import json;print(json.load(open('$STATE')).get('ota_version',''))" 2>/dev/null || echo "")
-          echo "旧: $OLD_OTA / 新: $NEW_OTA"
-
-          read_state() { python3 -c "import json,sys;d=json.load(open('$STATE'));print(d['spoof'].get('$1',''))" 2>/dev/null || echo ""; }
+          read_state() { python3 -c "import json;d=json.load(open('$STATE'));print(d['spoof'].get('$1',''))" 2>/dev/null || echo ""; }
           SUFFIX=$(read_state SUFFIX); BT=$(read_state BUILD_TIME); SUB=$(read_state RESUBLEVEL)
           CHANGED=false
+          echo "旧: $OLD_OTA / 新: $NEW_OTA"
 
           if [ -n "$NEW_OTA" ] && [ "$NEW_OTA" != "$OLD_OTA" ]; then
             echo "== 官方版本变了，尝试读内核串"
@@ -124,16 +127,19 @@ jobs:
               if [ -n "$VER" ] && [ -n "$BTN" ]; then
                 SUFFIX=$(echo "$VER" | sed -E 's/^[0-9.]+-android[0-9]+-//')
                 SUB=$(echo "$VER" | sed -E 's/^5\.15\.([0-9]+).*/\1/')
-                BT="$BTN"
-                CHANGED=true
+                BT="$BTN"; CHANGED=true
               else
-                echo "::warning::没读到内核串，沿用上次参数"
-                NEW_OTA="$OLD_OTA"
+                echo "::warning::没读到内核串，沿用上次参数"; NEW_OTA="$OLD_OTA"
               fi
             else
-              echo "::warning::没有可用链接，沿用上次参数"
-              NEW_OTA="$OLD_OTA"
+              echo "::warning::没有可用链接，沿用上次参数"; NEW_OTA="$OLD_OTA"
             fi
+          fi
+
+          # 空值守卫：参数不全就不派发，避免编出「随机后缀」的废品
+          if [ -z "$SUFFIX" ] || [ -z "$BT" ]; then
+            echo "::error::伪装参数为空（SUFFIX='$SUFFIX' BUILD_TIME='$BT'），停止派发"
+            exit 1
           fi
 
           echo "== 本轮使用: SUFFIX=$SUFFIX BUILD_TIME=$BT RESUBLEVEL=$SUB"
@@ -145,20 +151,19 @@ jobs:
             echo "changed=$CHANGED"
           } >> "$GITHUB_OUTPUT"
 
-      # ---------- 4. 演练：只派发 ping ----------
+      # ---------- 4. 演练 ----------
       - name: 演练（派发 ping）
         if: env.DRY_RUN == 'true'
         run: |
           set -uo pipefail
           gh workflow run ping.yml --repo "$REPO" --ref "${GITHUB_REF_NAME}"
-          sleep 20
+          sleep 15
           ID=$(gh run list --repo "$REPO" --workflow ping.yml --limit 1 --json databaseId --jq '.[0].databaseId')
-          echo "ping run: $ID"
           gh run watch "$ID" --repo "$REPO" --exit-status --interval 10
-          echo "派发链路可用 ✅"
+          echo "派发链路可用"
 
-      # ---------- 5. 真实派发 + 等构建 + 发 Release ----------
-      - name: 触发两版编译并归档
+      # ---------- 5. 两版并行：派发 → 轮询 → 取产物 ----------
+      - name: 触发两版编译（并行）
         if: env.DRY_RUN != 'true'
         run: |
           set -uo pipefail
@@ -167,8 +172,8 @@ jobs:
           SUB="${{ steps.params.outputs.sublevel }}"
           : > runs.txt
           for b in BakaSU FinaSU; do
-            if [ "$b" = "BakaSU" ]; then KSU="main/main/Numbersf/"; else KSU="master/master/Numbersf/"; fi
-            echo "== 派发 $b"
+            if [ "$b" = "BakaSU" ]; then KSU="main/main/Numbersf/"; else KSU="master/dev/Numbersf/"; fi
+            echo "== 派发 $b (KSU_META=$KSU)"
             gh workflow run "Build All OnePlus Kernels" --repo "$REPO" --ref "$b" \
               -f FILE=$P_FILE -f SUSFS_CI=$P_SUSFS_CI -f KPM=$P_KPM \
               -f DYNAMIC_REPO=$P_DYNAMIC_REPO -f BUILD_TIME="$BT" -f KSU_META="$KSU" \
@@ -177,19 +182,32 @@ jobs:
               -f CCM=$P_CCM -f UNICODE_BYPASS=$P_UNICODE_BYPASS -f SCHED_HMBIRD=$P_SCHED_HMBIRD \
               -f DROID_SPACES=$P_DROID_SPACES -f RE_KERNEL=$P_RE_KERNEL -f SUSFS_DEV=$P_SUSFS_DEV \
               -f SPACE_NOCLEAN=$P_SPACE_NOCLEAN -f BUILD_NOCACHE=$P_BUILD_NOCACHE
-            sleep 12
+            sleep 10
             ID=$(gh run list --repo "$REPO" --branch "$b" --limit 1 --json databaseId --jq '.[0].databaseId')
             echo "$b=$ID" >> runs.txt
           done
           cat runs.txt
 
+          # 轮询两边状态，任意一边完成不提前退出
+          for i in $(seq 1 100); do
+            PENDING=0
+            while read -r line; do
+              id=${line##*=}
+              st=$(gh run view "$id" --repo "$REPO" --json status --jq '.status' 2>/dev/null || echo unknown)
+              [ "$st" = "completed" ] || PENDING=$((PENDING+1))
+            done < runs.txt
+            echo "[$i] 未完成: $PENDING"
+            [ "$PENDING" -eq 0 ] && break
+            sleep 45
+          done
+
           FAIL=0
           mkdir -p rel
           while read -r line; do
             b=${line%%=*}; id=${line##*=}
-            echo "== 等待 $b ($id)"
-            gh run watch "$id" --repo "$REPO" --exit-status --interval 60 || { echo "::error::$b 构建失败"; FAIL=1; }
-            # 用 artifact 的原始 zip：gh run download 会解包，解出来的文件不再是可刷的包
+            CONC=$(gh run view "$id" --repo "$REPO" --json conclusion --jq '.conclusion')
+            echo "== $b ($id) => $CONC"
+            [ "$CONC" = "success" ] || { echo "::error::$b 构建失败"; FAIL=1; }
             gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[]|"\(.id) \(.name)"' > arts.txt || true
             while read -r aid aname; do
               out="rel/${b}__${aname}.zip"
@@ -201,37 +219,72 @@ jobs:
 
           TAG="kernel-$(date -u +%Y%m%d)"
           gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes "自动构建：SUFFIX=$SUFFIX / BUILD_TIME=$BT / SUBLEVEL=$SUB；OTA=${{ steps.params.outputs.ota_version }}" \
+            --notes "SUFFIX=$SUFFIX | BUILD_TIME=$BT | SUBLEVEL=$SUB | OTA=${{ steps.params.outputs.ota_version }}" \
             rel/*.zip || { echo "::error::Release 创建失败"; FAIL=1; }
           [ "$FAIL" = "0" ] || exit 1
 
-      # ---------- 6. 更新状态记录 ----------
+      # ---------- 6. 状态 + 报告 ----------
       - name: 更新状态记录
         if: env.DRY_RUN != 'true' && success()
         run: |
           mkdir -p state
+          OTA_VER="${{ steps.params.outputs.ota_version }}" SUF="${{ steps.params.outputs.suffix }}" \
+          BT="${{ steps.params.outputs.build_time }}" SUB="${{ steps.params.outputs.sublevel }}" \
           python3 - <<'PY'
-          import json, os, subprocess, datetime
+          import json, os, datetime
           p = 'state/kernel-state.json'
           d = json.load(open(p)) if os.path.exists(p) else {}
           d['updated_at'] = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-          d['ota_version'] = os.environ.get('OTA_VER', '')
-          d['spoof'] = {
-              'SUFFIX': os.environ.get('SUF', ''),
-              'BUILD_TIME': os.environ.get('BT', ''),
-              'RESUBLEVEL': os.environ.get('SUB', ''),
-          }
+          d['ota_version'] = os.environ['OTA_VER']
+          d['spoof'] = {'SUFFIX': os.environ['SUF'], 'BUILD_TIME': os.environ['BT'], 'RESUBLEVEL': os.environ['SUB']}
           json.dump(d, open(p, 'w'), ensure_ascii=False, indent=2)
+          PY
+          # 记录各上游当前提交，便于事后对账
+          python3 - <<'PY' || true
+          import json, subprocess
+          def head(url, ref):
+              try:
+                  out = subprocess.run(['git','ls-remote',url,'refs/heads/'+ref],capture_output=True,text=True,timeout=60).stdout
+                  return out.split()[0][:12] if out.strip() else ''
+              except Exception:
+                  return ''
+          d = json.load(open('state/kernel-state.json'))
+          d['upstream'] = {
+              'manager_bakasu': head('https://github.com/Baka-SU/BakaSU.git','main'),
+              'manager_finasu': head('https://github.com/LyraVoid/FinaSU.git','dev'),
+              'susfs': head('https://gitlab.com/simonpunk/susfs4ksu.git','gki-16.0.0-5.15'),
+              'action_bakasu': head('https://github.com/Numbersf/Action-Build.git','BakaSU'),
+              'action_finasu': head('https://github.com/Numbersf/Action-Build.git','FinaSU'),
+          }
+          json.dump(d, open('state/kernel-state.json','w'), ensure_ascii=False, indent=2)
+          print(json.dumps(d.get('upstream'), ensure_ascii=False))
           PY
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add state/kernel-state.json
           git diff --cached --quiet || { git commit -m "chore(state): 每周快照 $(date -u +%F)"; git push; }
-        env:
-          OTA_VER: ${{ steps.params.outputs.ota_version }}
-          SUF: ${{ steps.params.outputs.suffix }}
-          BT: ${{ steps.params.outputs.build_time }}
-          SUB: ${{ steps.params.outputs.sublevel }}
+
+      - name: 报告
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -uo pipefail
+          {
+            echo "## 每周内核构建 $(date -u +%F)"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 伪装 SUFFIX | \`${{ steps.params.outputs.suffix }}\` |"
+            echo "| BUILD_TIME | \`${{ steps.params.outputs.build_time }}\` |"
+            echo "| RESUBLEVEL | \`${{ steps.params.outputs.sublevel }}\` |"
+            echo "| 官方版本 | \`${{ steps.params.outputs.ota_version }}\` |"
+            echo "| 追平冲突 | ${{ steps.sync.outputs.sync_conflict }} |"
+            echo
+            echo "构建 run："
+            while read -r line; do echo "- \`$line\` → https://github.com/$REPO/actions/runs/${line##*=}"; done < runs.txt 2>/dev/null || true
+            echo
+            echo "产物："
+            ls -1 rel 2>/dev/null | sed 's/^/- /' || echo "- （无）"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   notify:
     name: 失败时开 issue
