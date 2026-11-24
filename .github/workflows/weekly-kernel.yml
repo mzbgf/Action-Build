@@ -1,21 +1,21 @@
 name: Weekly Kernel Update
 
-# 每周一次：追平上游 → 读官方内核版本串 → 触发两版编译 → 发 Release → 写状态
-# 职责边界：只负责「追平 / 取参数 / 派发 / 收产物 / 报告」，不判断产物合不合格。
+# 每周一次：追平上游 → 刷新映射表（顺带）→ 读源码版本查表 → 触发两版编译 → 发 Release
+# 判定只有一条：查表是否命中源码 SUBLEVEL。命中就发；不命中用表里最新一行编，但不发 Release。
+# 表刷新是顺带动作，成败不影响发布判定；放前面只是让它本次补的行能参与本次匹配。
 on:
   schedule:
     - cron: '0 18 * * 0'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: '演练：只追平上游+读取参数，不派发编译（默认关闭＝真编译）'
+        description: '演练：只追平上游 + 刷新表 + 查参数，不派发编译（默认关闭＝真编译）'
         type: boolean
         default: false
 
 permissions:
   contents: write
   actions: write
-  issues: write
 
 concurrency:
   group: weekly-kernel
@@ -23,12 +23,15 @@ concurrency:
 
 env:
   REPO: ${{ github.repository }}
-  OTA_PREFIX: PHB110_11.H
-  REGION: cn
-  STATE: state/kernel-state.json
+  MAP: state/kernel-map.json
+  # 源码 SUBLEVEL 从这里读（一行 curl，不 clone）
+  KSRC_MAKEFILE: https://raw.githubusercontent.com/OnePlusOSS/android_kernel_common_oneplus_sm8550/oneplus/sm8550_b_16.0.0_oneplus_11/Makefile
+  # oplusrom 的机型目录：版本文件名列表，每个 .txt 里是一条直链
+  OPLUSROM_DIR: https://github.com/chlink2025/oplusrom/tree/main/links/%E4%B8%80%E5%8A%A011
+  OPLUSROM_RAW: https://raw.githubusercontent.com/chlink2025/oplusrom/main/links/%E4%B8%80%E5%8A%A011
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-  # ---- 18 项固定参数 ----
+  # ---- 17 项固定参数 ----
   P_FILE: oneplus_11_b
   P_SUSFS_CI: CI
   P_KPM: N/A
@@ -49,14 +52,16 @@ env:
 
 jobs:
   update:
-    name: 追平 + 取参数 + 派发 + 归档
+    name: 追平 + 刷新表 + 查参数 + 派发 + 归档
     runs-on: ubuntu-latest
     timeout-minutes: 180
     outputs:
       suffix: ${{ steps.params.outputs.suffix }}
       build_time: ${{ steps.params.outputs.build_time }}
       sublevel: ${{ steps.params.outputs.sublevel }}
-      ota_version: ${{ steps.params.outputs.ota_version }}
+      version: ${{ steps.params.outputs.version }}
+      mode: ${{ steps.params.outputs.mode }}
+      src: ${{ steps.params.outputs.src }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,81 +91,148 @@ jobs:
           done
           echo "sync_conflict=$CONFLICT" >> "$GITHUB_OUTPUT"
 
-      # ---------- 2. 查官方 OTA ----------
-      - name: 查官方 OTA 版本
+      # ---------- 2. 刷新映射表（顺带动作，失败不阻断） ----------
+      # 抓 oplusrom 目录 → 数值排序 → 与表比对差集 → 逐版取直链、取 boot、解内核串 → 补行
+      # 第一次跑差集等于全部，会下载十几个版本，之后差集通常为空
+      - name: 刷新映射表
+        id: refresh
+        continue-on-error: true
         run: |
           set -uo pipefail
-          python3 -m pip install --quiet requests cryptography
-          git clone --depth 1 -q https://github.com/JerryTse-OSS/OPlus-Tracker.git ot
-          python3 ot/tomboy_pro.py "$OTA_PREFIX" "$REGION" > ota.txt 2>&1 || true
-          sed -n '1,30p' ota.txt
-          grep -q '• Link:' ota.txt || echo "::warning::没查到 OTA 链接，本轮沿用上次参数"
+          mkdir -p work state
 
-      # ---------- 3. 决定参数（含空值守卫） ----------
-      - name: 决定伪装参数
+          # 2a. 版本列表（从目录页 HTML 里取文件名，去重）
+          curl -sL --max-time 60 -A "Mozilla/5.0" "$OPLUSROM_DIR" -o work/dir.html || true
+          grep -o '"name":"PHB110_[^"]*\.txt"' work/dir.html 2>/dev/null \
+            | sed 's/.*"name":"//; s/"$//' | sort -u > work/versions.txt || true
+          echo "目录里 $(wc -l < work/versions.txt) 个版本："
+          cat work/versions.txt
+
+          # 2b. 差集（表里没有的版本），按数值逐段降序
+          python3 - <<'PY'
+          import json, os, re
+          vs = [l.strip() for l in open('work/versions.txt') if l.strip()]
+          def key(v):
+              m = re.search(r'_(\d+)\.(\d+)\.(\d+)\.(\d+)', v)
+              return [int(x) for x in m.groups()] if m else [0,0,0,0]
+          vs.sort(key=key, reverse=True)
+          known = set()
+          if os.path.exists(os.environ['MAP']):
+              known = {e['version'] for e in json.load(open(os.environ['MAP'])).get('entries', [])}
+          todo = [v for v in vs if v not in known]
+          open('work/todo.txt','w').write('\n'.join(todo) + ('\n' if todo else ''))
+          print(f'表里已有 {len(known)} 版，本轮待补 {len(todo)} 版')
+          PY
+          cat work/todo.txt
+
+          # 2c. 工具（一次准备）
+          if [ -s work/todo.txt ]; then
+            curl -fsSL -o work/pd.zip "https://github.com/rhythmcache/payload-dumper-rust/releases/download/payload-dumper-rust-v0.8.4/payload_dumper-linux-x86_64.zip" || true
+            unzip -q -o work/pd.zip -d work/pd >/dev/null 2>&1 || true
+            chmod +x work/pd/payload_dumper 2>/dev/null || true
+            gh release download --repo topjohnwu/Magisk -p 'Magisk-*.apk' -D work --clobber >/dev/null 2>&1 || true
+            unzip -q -o work/Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d work/mb >/dev/null 2>&1 || true
+            chmod +x work/mb/lib/x86_64/libmagiskboot.so 2>/dev/null || true
+          fi
+
+          # 2d. 逐版补行（单个失败只记一笔，不中断）
+          : > work/new.tsv
+          FAILED=0
+          while read -r V; do
+            [ -n "$V" ] || continue
+            echo "===== $V"
+            ENC=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$V")
+            URL=$(curl -s --max-time 40 "$OPLUSROM_RAW/$ENC" | head -1)
+            case "$URL" in
+              http*) ;;
+              *) echo "::warning::$V 没有直链"; FAILED=$((FAILED+1)); continue ;;
+            esac
+            rm -rf work/boot; mkdir -p work/boot
+            if ! work/pd/payload_dumper -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
+              echo "::warning::$V 取 boot 失败：$(tail -1 work/pd.log | cut -c1-120)"; FAILED=$((FAILED+1)); continue
+            fi
+            if ! ( cd work/boot && ../../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb.log 2>&1 ) || [ ! -f work/boot/kernel ]; then
+              echo "::warning::$V 解 boot 失败"; FAILED=$((FAILED+1)); continue
+            fi
+            VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-o-[0-9]+-g[0-9a-f]+' work/boot/kernel 2>/dev/null | head -1)
+            BTN=$(grep -aoE 'SMP PREEMPT [A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9:]{8} UTC [0-9]{4}' work/boot/kernel 2>/dev/null | head -1 | sed 's/^SMP PREEMPT //')
+            if [ -z "$VER" ] || [ -z "$BTN" ]; then
+              echo "::warning::$V 没解出内核串"; FAILED=$((FAILED+1)); continue
+            fi
+            printf '%s\t%s\t%s\n' "$V" "$VER" "$BTN" >> work/new.tsv
+            echo "  读到 $VER | $BTN"
+          done < work/todo.txt
+
+          # 2e. 合并进表（按数值降序），有变化就提交
+          python3 - <<'PY'
+          import json, os, re, datetime
+          def key(v):
+              m = re.search(r'_(\d+)\.(\d+)\.(\d+)\.(\d+)', v)
+              return [int(x) for x in m.groups()] if m else [0,0,0,0]
+          p = os.environ['MAP']
+          d = json.load(open(p)) if os.path.exists(p) else {'entries': []}
+          E = {e['version']: e for e in d.get('entries', [])}
+          for line in open('work/new.tsv'):
+              parts = line.rstrip('\n').split('\t')
+              if len(parts) != 3: continue
+              ver, uts, bt = parts
+              suff = re.sub(r'^[0-9.]+-android[0-9]+-', '', uts)
+              sub = re.search(r'^5\.15\.(\d+)', uts)
+              E[ver] = {
+                  'version': ver, 'key': key(ver), 'uts': uts,
+                  'sublevel': sub.group(1) if sub else '',
+                  'suffix': suff, 'build_time': bt,
+                  'fetched_at': datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+              }
+          d['entries'] = sorted(E.values(), key=lambda e: e['key'], reverse=True)
+          d['updated_at'] = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+          json.dump(d, open(p,'w'), ensure_ascii=False, indent=2)
+          print(f'表里现有 {len(d["entries"])} 版')
+          PY
+
+          echo "本轮失败 $FAILED 版"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$MAP"
+          git diff --cached --quiet || { git commit -m "chore(map): 补 $(wc -l < work/new.tsv) 版 $(date -u +%F)"; git push; }
+
+      # ---------- 3. 查表定参数（唯一的判定点） ----------
+      - name: 读源码版本并查表
         id: params
         run: |
           set -uo pipefail
-          NEW_OTA=$(grep -m1 -oP '(?<=• Version: ).*' ota.txt | sed 's/[[:space:]]*$//' || true)
-          OLD_OTA=$(python3 -c "import json;print(json.load(open('$STATE')).get('ota_version',''))" 2>/dev/null || echo "")
-          read_state() { python3 -c "import json;d=json.load(open('$STATE'));print(d['spoof'].get('$1',''))" 2>/dev/null || echo ""; }
-          SUFFIX=$(read_state SUFFIX); BT=$(read_state BUILD_TIME); SUB=$(read_state RESUBLEVEL)
-          CHANGED=false
-          echo "旧: $OLD_OTA / 新: $NEW_OTA"
-
-          if [ -n "$NEW_OTA" ] && [ "$NEW_OTA" != "$OLD_OTA" ]; then
-            echo "== 官方版本变了，尝试读内核串"
-            URL=$(grep -m1 -oP '(?<=• Link: )\S+' ota.txt || true)
-            if [ -n "$URL" ]; then
-              gh release download payload-dumper-rust-v0.8.4 --repo rhythmcache/payload-dumper-rust \
-                 -p 'payload_dumper-linux-x86_64.zip' -D tools --clobber || true
-              unzip -q -o tools/payload_dumper-linux-x86_64.zip -d tools/pd || true
-              chmod +x tools/pd/payload_dumper || true
-              tools/pd/payload_dumper -i boot -o ota "$URL" || echo "::warning::取 boot 失败"
-              gh release download --repo topjohnwu/Magisk -p 'Magisk-*.apk' -D tools --clobber || true
-              unzip -q -o tools/Magisk-*.apk 'lib/x86_64/libmagiskboot.so' -d tools/mb || true
-              chmod +x tools/mb/lib/x86_64/libmagiskboot.so || true
-              ( cd ota && ../tools/mb/lib/x86_64/libmagiskboot.so unpack boot.img ) || echo "::warning::解 boot 失败"
-              VER=$(grep -aoE '5\.15\.[0-9]+-android[0-9]+-8-o-[0-9]+-g[0-9a-f]+' ota/kernel 2>/dev/null | head -1)
-              BTN=$(grep -aoE 'SMP PREEMPT [A-Z][a-z]{2} [A-Z][a-z]{2} +[0-9]{1,2} [0-9:]{8} UTC [0-9]{4}' ota/kernel 2>/dev/null | head -1 | sed 's/^SMP PREEMPT //')
-              echo "读到: $VER | $BTN"
-              if [ -n "$VER" ] && [ -n "$BTN" ]; then
-                SUFFIX=$(echo "$VER" | sed -E 's/^[0-9.]+-android[0-9]+-//')
-                SUB=$(echo "$VER" | sed -E 's/^5\.15\.([0-9]+).*/\1/')
-                BT="$BTN"; CHANGED=true
-              else
-                echo "::warning::没读到内核串，沿用上次参数"; NEW_OTA="$OLD_OTA"
-              fi
-            else
-              echo "::warning::没有可用链接，沿用上次参数"; NEW_OTA="$OLD_OTA"
-            fi
+          SRC=$(curl -s --max-time 40 "$KSRC_MAKEFILE" | awk '/^SUBLEVEL/{print $3; exit}')
+          SRC="${SRC//[[:space:]]/}"
+          echo "源码 SUBLEVEL=${SRC:-<空>}"
+          if [ -z "$SRC" ]; then
+            echo "::error::读不到源码 SUBLEVEL（Makefile 地址可能变了）"; exit 1
+          fi
+          if [ ! -s "$MAP" ]; then
+            echo "::error::映射表为空或不存在，没有可用参数"; exit 1
           fi
 
-          # 空值守卫：参数不全就不派发，避免编出「随机后缀」的废品
-          if [ -z "$SUFFIX" ] || [ -z "$BT" ]; then
-            echo "::error::伪装参数为空（SUFFIX='$SUFFIX' BUILD_TIME='$BT'），停止派发"
-            exit 1
-          fi
+          SRC="$SRC" python3 - <<'PY'
+          import json, os
+          src = os.environ['SRC']
+          E = json.load(open(os.environ['MAP']))['entries']
+          if not E:
+              print('::error::表里没有任何版本'); raise SystemExit(1)
+          cand = [e for e in E if e['sublevel'] == src]
+          if cand:
+              e = max(cand, key=lambda x: x['key']); mode = 'matched'
+          else:
+              e = max(E, key=lambda x: x['key']); mode = 'fallback'
+          out = open(os.environ['GITHUB_OUTPUT'], 'a')
+          for k, v in (('suffix', e['suffix']), ('build_time', e['build_time']),
+                       ('sublevel', e['sublevel']), ('version', e['version']),
+                       ('mode', mode), ('src', src)):
+              out.write(f'{k}={v}\n')
+          print(f"模式={mode} 版本={e['version']} SUBLEVEL={e['sublevel']} SUFFIX={e['suffix']} BUILD_TIME={e['build_time']}")
+          if mode == 'fallback':
+              print(f"::warning::源码 SUBLEVEL={src} 在表里没有对应版本，回落到 {e['version']}；本轮只编译不发布")
+          PY
 
-          echo "== 本轮使用: SUFFIX=$SUFFIX BUILD_TIME=$BT RESUBLEVEL=$SUB"
-          {
-            echo "suffix=$SUFFIX"
-            echo "build_time=$BT"
-            echo "sublevel=$SUB"
-            echo "ota_version=${NEW_OTA:-$OLD_OTA}"
-            echo "changed=$CHANGED"
-          } >> "$GITHUB_OUTPUT"
-
-      # ---------- 4. 演练（只跑前半段，不派发） ----------
-      - name: 演练（不派发编译）
-        if: env.DRY_RUN == 'true'
-        run: |
-          echo "演练模式：追平与取参数已完成，本轮不派发编译。"
-          echo "- SUFFIX=\`${{ steps.params.outputs.suffix }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- BUILD_TIME=\`${{ steps.params.outputs.build_time }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- OTA=\`${{ steps.params.outputs.ota_version }}\`" >> "$GITHUB_STEP_SUMMARY"
-
-      # ---------- 5. 两版并行：派发 → 轮询 → 取产物 ----------
+      # ---------- 4. 演练（只跑到查表） ----------
       - name: 触发两版编译（并行）
         if: env.DRY_RUN != 'true'
         run: |
@@ -186,7 +258,6 @@ jobs:
           done
           cat runs.txt
 
-          # 轮询两边状态，任意一边完成不提前退出
           PENDING=99
           for i in $(seq 1 100); do
             PENDING=0
@@ -218,85 +289,75 @@ jobs:
             exit 1
           fi
 
-          # 全部成功才取产物
           mkdir -p rel
           while read -r line; do
             b=${line%%=*}; id=${line##*=}
             gh api "repos/$REPO/actions/runs/$id/artifacts" --jq '.artifacts[]|"\(.id) \(.name)"' > arts.txt || true
             while read -r aid aname; do
               out="rel/${b}__${aname}.zip"
-              # 官方 artifact 下载端点（返回原始 zip，未解包）
-              # 备选：gh run download 会解包，需要再自行打包；暂不采用
               curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -o "$out" \
                 "https://api.github.com/repos/$REPO/actions/artifacts/$aid/zip" && echo "  取到 $out"
             done < arts.txt
           done < runs.txt
           ls -l rel || true
 
-          TAG="kernel-$(date -u +%Y%m%d)"
-          OTA_VER="${{ steps.params.outputs.ota_version }}"
-          gh release create "$TAG" --repo "$REPO" --title "$TAG" \
-            --notes "对应官方版本 ${OTA_VER}；内核伪装 SUFFIX=$SUFFIX / BUILD_TIME=$BT / SUBLEVEL=$SUB；下载前请核对你手机的版本号是否一致。" \
-            rel/*.zip || { echo "::error::Release 创建失败"; exit 1; }
-
-      # ---------- 6. 状态 + 报告 ----------
-      - name: 更新状态记录
-        if: env.DRY_RUN != 'true' && success()
-        run: |
-          mkdir -p state
-          OTA_VER="${{ steps.params.outputs.ota_version }}" SUF="${{ steps.params.outputs.suffix }}" \
-          BT="${{ steps.params.outputs.build_time }}" SUB="${{ steps.params.outputs.sublevel }}" \
-          python3 - <<'PY'
-          import json, os, datetime
-          p = 'state/kernel-state.json'
-          d = json.load(open(p)) if os.path.exists(p) else {}
-          d['updated_at'] = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-          d['ota_version'] = os.environ['OTA_VER']
-          d['spoof'] = {'SUFFIX': os.environ['SUF'], 'BUILD_TIME': os.environ['BT'], 'RESUBLEVEL': os.environ['SUB']}
-          json.dump(d, open(p, 'w'), ensure_ascii=False, indent=2)
-          PY
-          # 记录各上游当前提交，便于事后对账
-          python3 - <<'PY' || true
-          import json, subprocess
-          def head(url, ref):
-              try:
-                  out = subprocess.run(['git','ls-remote',url,'refs/heads/'+ref],capture_output=True,text=True,timeout=60).stdout
-                  return out.split()[0][:12] if out.strip() else ''
-              except Exception:
-                  return ''
-          d = json.load(open('state/kernel-state.json'))
-          d['upstream'] = {
-              'manager_bakasu': head('https://github.com/Baka-SU/BakaSU.git','main'),
-              'manager_finasu': head('https://github.com/LyraVoid/FinaSU.git','dev'),
-              'susfs': head('https://gitlab.com/simonpunk/susfs4ksu.git','gki-16.0.0-5.15'),
-              'action_bakasu': head('https://github.com/Numbersf/Action-Build.git','BakaSU'),
-              'action_finasu': head('https://github.com/Numbersf/Action-Build.git','FinaSU'),
-          }
-          json.dump(d, open('state/kernel-state.json','w'), ensure_ascii=False, indent=2)
-          print(json.dumps(d.get('upstream'), ensure_ascii=False))
-          PY
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/kernel-state.json
-          git diff --cached --quiet || { git commit -m "chore(state): 每周快照 $(date -u +%F)"; git push; }
-
-      - name: 报告
-        if: env.DRY_RUN != 'true'
+      # ---------- 6. 发 Release（只在命中时） ----------
+      - name: 发 Release
+        if: env.DRY_RUN != 'true' && steps.params.outputs.mode == 'matched'
         run: |
           set -uo pipefail
+          TAG="kernel-$(date -u +%Y%m%d)"
+          gh release create "$TAG" --repo "$REPO" --title "$TAG" \
+            --notes "对应官方版本 ${{ steps.params.outputs.version }}；内核伪装 SUFFIX=${{ steps.params.outputs.suffix }} / BUILD_TIME=${{ steps.params.outputs.build_time }} / SUBLEVEL=${{ steps.params.outputs.sublevel }}；下载前请核对你手机的版本号是否一致。" \
+            rel/*.zip || { echo "::error::Release 创建失败"; exit 1; }
+
+      # ---------- 7. 未命中：产物留在 artifact，不发 Release ----------
+      - name: 未命中说明
+        if: env.DRY_RUN != 'true' && steps.params.outputs.mode != 'matched'
+        run: |
+          {
+            echo "## 本轮未发布"
+            echo
+            echo "源码 SUBLEVEL 在表里没有对应版本，回落到表里最新一行：\`${{ steps.params.outputs.version }}\`"
+            echo "该行的 SUBLEVEL 是 \`${{ steps.params.outputs.sublevel }}\`，与源码不符，版本号不可信，因此不发 Release。"
+            echo "产物仍在本次 Actions 的 artifact 里，可手动取用。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------- 8. 状态 + 报告 ----------
+      - name: 报告
+        if: always()
+        run: |
+          set -uo pipefail
+          N=$(python3 -c "import json;print(len(json.load(open('$MAP'))['entries']))" 2>/dev/null || echo 0)
+          if [ "${DRY_RUN:-false}" = "true" ]; then
+            RESULT="演练：已追平、已刷新表、已查参数，未派发编译"
+          elif [ "${{ steps.params.outputs.mode }}" = "matched" ]; then
+            RESULT="已发布（命中表里的官方版本）"
+          else
+            RESULT="未发布：源码版本在表里没有对应行，产物只留在 artifact"
+          fi
           {
             echo "## 每周内核构建 $(date -u +%F)"
             echo
             echo "| 项 | 值 |"
             echo "|---|---|"
+            echo "| 判定 | \`${{ steps.params.outputs.mode }}\` |"
+            echo "| 命中版本 | \`${{ steps.params.outputs.version }}\` |"
+            echo "| 源码 SUBLEVEL | \`${{ steps.params.outputs.src }}\` |"
             echo "| 伪装 SUFFIX | \`${{ steps.params.outputs.suffix }}\` |"
             echo "| BUILD_TIME | \`${{ steps.params.outputs.build_time }}\` |"
             echo "| RESUBLEVEL | \`${{ steps.params.outputs.sublevel }}\` |"
-            echo "| 官方版本 | \`${{ steps.params.outputs.ota_version }}\` |"
+            echo "| 表中版本数 | $N |"
+            echo "| 表刷新 | ${{ steps.refresh.outcome }} |"
             echo "| 追平冲突 | ${{ steps.sync.outputs.sync_conflict }} |"
+            echo "| 本轮结果 | $RESULT |"
             echo
             echo "构建 run："
-            while read -r line; do echo "- \`$line\` → https://github.com/$REPO/actions/runs/${line##*=}"; done < runs.txt 2>/dev/null || true
+            if [ -f runs.txt ]; then
+              while read -r line; do echo "- \`$line\` → https://github.com/$REPO/actions/runs/${line##*=}"; done < runs.txt
+            else
+              echo "- （未派发）"
+            fi
             echo
             echo "产物："
             ls -1 rel 2>/dev/null | sed 's/^/- /' || echo "- （无）"
