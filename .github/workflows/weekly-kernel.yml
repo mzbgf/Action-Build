@@ -148,7 +148,7 @@ jobs:
               *) echo "::warning::$V 没有直链"; FAILED=$((FAILED+1)); continue ;;
             esac
             rm -rf work/boot; mkdir -p work/boot
-            if ! work/pd/payload_dumper --dns 8.8.8.8,1.1.1.1 -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
+            if ! work/pd/payload_dumper --user-agent "payload-dumper/0.8.4" -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
               echo "::warning::$V 取 boot 失败：$(tail -1 work/pd.log | cut -c1-160)"; FAILED=$((FAILED+1)); continue
             fi
             if ! ( cd work/boot && ../../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb.log 2>&1 ) || [ ! -f work/boot/kernel ]; then
