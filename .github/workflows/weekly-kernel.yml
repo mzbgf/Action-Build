@@ -148,8 +148,8 @@ jobs:
               *) echo "::warning::$V 没有直链"; FAILED=$((FAILED+1)); continue ;;
             esac
             rm -rf work/boot; mkdir -p work/boot
-            if ! work/pd/payload_dumper -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
-              echo "::warning::$V 取 boot 失败：$(tail -1 work/pd.log | cut -c1-120)"; FAILED=$((FAILED+1)); continue
+            if ! work/pd/payload_dumper --dns 8.8.8.8,1.1.1.1 -i boot -o work/boot "$URL" > work/pd.log 2>&1 || [ ! -f work/boot/boot.img ]; then
+              echo "::warning::$V 取 boot 失败：$(tail -1 work/pd.log | cut -c1-160)"; FAILED=$((FAILED+1)); continue
             fi
             if ! ( cd work/boot && ../../mb/lib/x86_64/libmagiskboot.so unpack boot.img > ../mb.log 2>&1 ) || [ ! -f work/boot/kernel ]; then
               echo "::warning::$V 解 boot 失败"; FAILED=$((FAILED+1)); continue
@@ -201,7 +201,9 @@ jobs:
         id: params
         run: |
           set -uo pipefail
-          SRC=$(curl -s --max-time 40 "$KSRC_MAKEFILE" | awk '/^SUBLEVEL/{print $3; exit}')
+          mkdir -p work
+          curl -s --max-time 40 "$KSRC_MAKEFILE" -o work/Makefile || true
+          SRC=$(awk '/^SUBLEVEL/{print $3}' work/Makefile 2>/dev/null | tail -1)
           SRC="${SRC//[[:space:]]/}"
           echo "源码 SUBLEVEL=${SRC:-<空>}"
           if [ -z "$SRC" ]; then
