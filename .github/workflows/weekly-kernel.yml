@@ -112,8 +112,9 @@ jobs:
             *downloadCheck*) FINAL=$(curl -sI -H "userid: oplus-ota|" "$LINK" | tr -d '\r' | awk 'tolower($1)=="location:"{print $2; exit}' || true) ;;
             *) FINAL="$LINK" ;;
           esac
-          echo "直链=${FINAL:0:80}"
-          case "$FINAL" in *.zip) ;; *) echo "::warning::没解析出静态直链，跳过"; exit 0 ;; esac
+          echo "直链头=${FINAL:0:70}"
+          echo "直链尾=${FINAL: -70}"
+          case "$FINAL" in http*) ;; *) echo "::warning::没解析出直链，跳过"; exit 0 ;; esac
 
           curl -fsSL -o work/pd.zip "https://github.com/rhythmcache/payload-dumper-rust/releases/download/payload-dumper-rust-v0.8.4/payload_dumper-linux-x86_64.zip" || true
           unzip -q -o work/pd.zip -d work/pd >/dev/null 2>&1 || true
