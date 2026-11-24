@@ -139,7 +139,21 @@
       "suffix": "8-o-00718-gdd3c2549102f",
       "build_time": "Thu Jan 4 05:01:04 UTC 2024",
       "fetched_at": "2026-11-24T20:43:37Z"
+    },
+    {
+      "version": "PHB110_13.1.0.196(CN01)",
+      "key": [
+        13,
+        1,
+        0,
+        196
+      ],
+      "uts": "5.15.74-android13-8-o-gaa4c29b7e680",
+      "sublevel": "74",
+      "suffix": "8-o-gaa4c29b7e680",
+      "build_time": "Tue Jun 20 11:26:50 UTC 2023",
+      "fetched_at": "2026-11-24T21:50:13Z"
     }
   ],
-  "updated_at": "2026-11-24T21:49:45Z"
+  "updated_at": "2026-11-24T21:50:13Z"
 }
