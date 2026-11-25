@@ -160,7 +160,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$MAP"
-          git diff --cached --quiet || { git commit -q -m "chore(map): 当前版本 $OV $(date -u +%F)"; git push -q; }
+          git diff --cached --quiet || { git commit -q -m "chore(map): 当前版本 $OV $(date -u +%F)"; git push -q || echo "::warning::表已提交但推送失败，下次会重复下载"; }
 
       # ---------- 3. 刷新映射表（顺带动作，失败不阻断） ----------
       # 抓 oplusrom 目录 → 数值排序 → 与表比对差集 → 逐版取直链、取 boot、解内核串 → 补行
@@ -281,7 +281,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$MAP"
-          git diff --cached --quiet || { git commit -m "chore(map): 补 $(wc -l < work/new.tsv) 版 $(date -u +%F)"; git push; }
+          git diff --cached --quiet || { git commit -m "chore(map): 补 $(wc -l < work/new.tsv) 版 $(date -u +%F)"; git push || echo "::warning::表已提交但推送失败，下次会重复下载"; }
 
       # ---------- 3. 查表定参数（唯一的判定点） ----------
       - name: 读源码版本并查表
@@ -333,7 +333,9 @@ jobs:
           for b in BakaSU FinaSU; do
             if [ "$b" = "BakaSU" ]; then KSU="main/main/Numbersf/"; else KSU="master/dev/Numbersf/"; fi
             echo "== 派发 $b (KSU_META=$KSU)"
-            gh workflow run "Build All OnePlus Kernels" --repo "$REPO" --ref "$b" \
+            PREV=$(gh run list --repo "$REPO" --branch "$b" --limit 1 --json databaseId --jq '.[0].databaseId // ""' 2>/dev/null || true)
+            echo "  派发前该分支最新 run: ${PREV:-无}"
+            if ! gh workflow run "Build All OnePlus Kernels" --repo "$REPO" --ref "$b" \
               -f FILE=$P_FILE -f SUSFS_CI=$P_SUSFS_CI -f KPM=$P_KPM \
               -f DYNAMIC_REPO=$P_DYNAMIC_REPO -f BUILD_TIME="$BT" -f KSU_META="$KSU" \
               -f LZ4_UPDATE=$P_LZ4_UPDATE -f ZRAM=$P_ZRAM -f SUFFIX="$SUFFIX" -f RESUBLEVEL="$SUB" \
@@ -341,8 +343,25 @@ jobs:
               -f CCM=$P_CCM -f UNICODE_BYPASS=$P_UNICODE_BYPASS -f SCHED_HMBIRD=$P_SCHED_HMBIRD \
               -f DROID_SPACES=$P_DROID_SPACES -f RE_KERNEL=$P_RE_KERNEL -f SUSFS_DEV=$P_SUSFS_DEV \
               -f SPACE_NOCLEAN=$P_SPACE_NOCLEAN -f BUILD_NOCACHE=$P_BUILD_NOCACHE
-            sleep 10
-            ID=$(gh run list --repo "$REPO" --branch "$b" --limit 1 --json databaseId --jq '.[0].databaseId')
+            then
+              :
+            else
+              echo "::error::$b 派发失败"; exit 1
+            fi
+
+            # 必须等到一个新出现的 run：拿不到或还是旧的那条，说明派发没成，不能拿上次的产物充数
+            ID=""
+            for i in $(seq 1 10); do
+              sleep 6
+              ID=$(gh run list --repo "$REPO" --branch "$b" --limit 1 --json databaseId --jq '.[0].databaseId // ""' 2>/dev/null || true)
+              if [ -n "$ID" ] && [ "$ID" != "$PREV" ]; then break; fi
+              ID=""
+            done
+            if [ -z "$ID" ]; then
+              echo "::error::$b 派发后没等到新 run（派发失败或 API 延迟）——中止，避免把上次的 run 当成本次"
+              exit 1
+            fi
+            echo "  新 run: $ID"
             echo "$b=$ID" >> runs.txt
           done
           cat runs.txt
@@ -389,6 +408,11 @@ jobs:
             done < arts.txt
           done < runs.txt
           ls -l rel || true
+          N=$(ls -1 rel/*.zip 2>/dev/null | wc -l)
+          if [ "$N" -eq 0 ]; then
+            echo "::error::一个产物包都没取到，不发 Release"; exit 1
+          fi
+          echo "取到 $N 个包"
 
       # ---------- 6. 发 Release（只在命中时） ----------
       - name: 发 Release
